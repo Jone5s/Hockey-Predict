@@ -5,6 +5,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.utils.class_weight import compute_class_weight
+from sklearn.preprocessing import StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 
 # Load data
 merged_file_path = './metro_teams_merged.csv'
@@ -48,12 +51,30 @@ X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=
 class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(target), y=target)
 class_weight_dict = {i: weight for i, weight in enumerate(class_weights)}
 
-# Train a Random Forest with class weights
+# Standardize the numerical features to reduce home/away bias
+numeric_features = ['xGoalsFor_recent', 'goalsFor_recent', 'goalsAgainst_recent',
+                    'xGoalsAgainst_recent', 'opposingGoalsFor_recent', 'opposingGoalsAgainst_recent']
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', StandardScaler(), numeric_features)
+    ], remainder='passthrough'
+)
+
+# Create pipeline with preprocessing and Random Forest classifier
 base_model = RandomForestClassifier(random_state=42, class_weight=class_weight_dict)
 calibrated_model = CalibratedClassifierCV(base_model, method='isotonic', cv=5)  # Use isotonic regression for calibration
-calibrated_model.fit(X_train, y_train)
 
-# Update predict_odds_for_matchup function to use calibrated_model
+pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier', calibrated_model)
+])
+
+# Train the model
+pipeline.fit(X_train, y_train)
+
+# Update predict_odds_for_matchup function to use the pipeline
+
 def predict_odds_for_matchup(home_team, away_team, recent_data):
     # Retrieve recent performance data for each team
     home_recent = recent_data[(recent_data['team'] == home_team)].iloc[-1]
@@ -61,7 +82,6 @@ def predict_odds_for_matchup(home_team, away_team, recent_data):
     
     # Create a single row with the recent form features for both home and away teams
     sample_data = {
-        #'home_or_away': [1],  
         'xGoalsFor_recent': [home_recent['xGoalsFor_recent']],
         'goalsFor_recent': [home_recent['goalsFor_recent']],
         'goalsAgainst_recent': [home_recent['goalsAgainst_recent']],
@@ -84,7 +104,7 @@ def predict_odds_for_matchup(home_team, away_team, recent_data):
     sample_features = sample_features.reindex(columns=X_train.columns, fill_value=0)
 
     # Predict calibrated win/loss probabilities for the custom input
-    predicted_proba = calibrated_model.predict_proba(sample_features)
+    predicted_proba = pipeline.predict_proba(sample_features)
 
     # Calculate betting odds for the custom input
     epsilon = 1e-10
@@ -102,4 +122,4 @@ def predict_odds_for_matchup(home_team, away_team, recent_data):
     print(f"Odds for Home Team Win (With Margin): {odds_win_custom_with_margin:.2f}")
 
 # Test with calibrated model and balanced classes
-predict_odds_for_matchup('PHI', 'NYR', merged_data)
+predict_odds_for_matchup('NYR', 'PHI', merged_data)
