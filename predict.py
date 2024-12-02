@@ -1,93 +1,118 @@
 import pandas as pd
-import itertools
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import RobustScaler
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
 from sklearn.utils import resample
-import numpy as np
 
-# Step 1: Load and Explore the Data
-data = pd.read_csv('nhl_team_stats.csv')
+# Load the filtered dataset
+file_path = './metro_teams_filtered.csv'  # Update with your file path if different
+data = pd.read_csv(file_path)
 
-# Step 2: Feature Engineering
-team_pairs = list(itertools.combinations(data['team_name'], 2))
+# Create the 'outcome' column based on goalsFor and goalsAgainst
+data['outcome'] = (data['goalsFor'] > data['goalsAgainst']).astype(int)
 
-def create_match_features(team_a, team_b, data):
-    team_a_stats = data[data['team_name'] == team_a].iloc[0]
-    team_b_stats = data[data['team_name'] == team_b].iloc[0]
+# Select relevant features for prediction
+features = [
+    'scoreAdjustedShotsAttemptsAgainst', 
+    'unblockedShotAttemptsAgainst', 
+    'dZoneGiveawaysAgainst',
+    'xGoalsFromxReboundsOfShotsAgainst', 
+    'reboundxGoalsAgainst'
+]  # Modify as needed
+X = data[features]
+y = data['outcome']
+
+# Combine features and target for balancing
+combined_data = pd.concat([X, y], axis=1)
+
+# Separate majority and minority classes
+majority_class = combined_data[combined_data['outcome'] == 0]
+minority_class = combined_data[combined_data['outcome'] == 1]
+
+# Upsample the minority class
+minority_upsampled = resample(
+    minority_class,
+    replace=True,  # Sample with replacement
+    n_samples=len(majority_class),  # Match majority class size
+    random_state=42  # For reproducibility
+)
+
+# Combine upsampled minority class with majority class
+balanced_data = pd.concat([majority_class, minority_upsampled])
+
+# Separate features and target from balanced data
+X_balanced = balanced_data[features]
+y_balanced = balanced_data['outcome']
+
+# Split balanced data into training and testing sets
+X_train_balanced, X_test_balanced, y_train_balanced, y_test_balanced = train_test_split(
+    X_balanced, y_balanced, test_size=0.3, random_state=42, stratify=y_balanced
+)
+
+# Train the model
+model_balanced = RandomForestClassifier(random_state=42)
+model_balanced.fit(X_train_balanced, y_train_balanced)
+
+# Predict outcomes on the test set
+y_pred_balanced = model_balanced.predict(X_test_balanced)
+
+# Evaluate the model
+accuracy_balanced = accuracy_score(y_test_balanced, y_pred_balanced)
+report_balanced = classification_report(y_test_balanced, y_pred_balanced)
+
+# Print results
+print("Balanced Dataset Model Evaluation")
+print(f"Accuracy: {accuracy_balanced:.2f}")
+print("\nClassification Report:\n")
+print(report_balanced)
+
+# Function to predict matchup outcome
+def predict_matchup_fixed(team1_name, team2_name, data, model):
+    """
+    Predict the outcome of a matchup between two teams using historical game data.
+
+    Parameters:
+        team1_name (str): Name of the first team.
+        team2_name (str): Name of the second team.
+        data (pd.DataFrame): Dataset containing historical stats for all teams.
+        model: Trained machine learning model.
+
+    Returns:
+        str: Percentual prediction for each team's likelihood of winning, normalized to sum up to 100%.
+    """
+    # Extract all games for Team 1 and calculate average stats
+    team1_stats = data[data['playerTeam'] == team1_name][features].mean()
+    # Extract all games for Team 2 and calculate average stats
+    team2_stats = data[data['playerTeam'] == team2_name][features].mean()
     
-    match_features = {
-        'team_a': team_a,
-        'team_b': team_b,
-        'games_played_diff': team_a_stats['games_played'] - team_b_stats['games_played'],
-        'goals_for_diff': team_a_stats['goals_for'] - team_b_stats['goals_for'],
-        'goals_against_diff': team_a_stats['goals_against'] - team_b_stats['goals_against'],
-        'shots_for_per_game_diff': team_a_stats['shots_for_per_game'] - team_b_stats['shots_for_per_game'],
-        'shots_against_per_game_diff': team_a_stats['shots_against_per_game'] - team_b_stats['shots_against_per_game'],
-        'wins_diff': team_a_stats['wins'] - team_b_stats['wins'],
-        'losses_diff': team_a_stats['losses'] - team_b_stats['losses'],
-        'faceoff_win_pct_diff': team_a_stats['faceoff_win_pct'] - team_b_stats['faceoff_win_pct'],
-        'power_play_pct_diff': team_a_stats['power_play_pct'] - team_b_stats['power_play_pct'],
-        'penalty_kill_pct_diff': team_a_stats['penalty_kill_pct'] - team_b_stats['penalty_kill_pct'],
-        'recent_performance_diff': (team_a_stats['points'] / team_a_stats['games_played']) - (team_b_stats['points'] / team_b_stats['games_played'])
-    }
-    
-    return match_features
+    # Ensure stats are found for both teams
+    if team1_stats.empty or team2_stats.empty:
+        return "One or both teams not found in the dataset."
 
-# Randomize the order of team pairs to balance any biases
-randomized_team_pairs = team_pairs + [(b, a) for a, b in team_pairs]
-np.random.shuffle(randomized_team_pairs)
+    # Combine stats into a DataFrame for prediction
+    matchup_data = pd.DataFrame([team1_stats, team2_stats])
 
-matches = [create_match_features(team_a, team_b, data) for team_a, team_b in randomized_team_pairs]
-matches_df = pd.DataFrame(matches)
+    # Use the model to predict probabilities
+    probabilities = model.predict_proba(matchup_data)
 
-# Step 3: Define Labels (1 for win, 0 for loss based on goals_for_diff)
-def label_match(row):
-    return 1 if row['goals_for_diff'] > 0 else 0  # Simplify to binary outcome
+    # Extract probabilities for winning (class 1) for each team
+    team1_win_prob = probabilities[0][1]
+    team2_win_prob = probabilities[1][1]
 
-matches_df['label'] = matches_df.apply(label_match, axis=1)
+    # Normalize probabilities to sum up to 100%
+    total_prob = team1_win_prob + team2_win_prob
+    team1_win_prob_normalized = team1_win_prob / total_prob * 100
+    team2_win_prob_normalized = team2_win_prob / total_prob * 100
 
-# Step 4: Balance the Dataset by Resampling
-majority = matches_df[matches_df.label == 1]
-minority = matches_df[matches_df.label == 0]
+    return (
+        f"Prediction:\n"
+        f"{team1_name} Win Probability: {team1_win_prob_normalized:.2f}%\n"
+        f"{team2_name} Win Probability: {team2_win_prob_normalized:.2f}%"
+    )
 
-minority_upsampled = resample(minority, replace=True, n_samples=len(majority), random_state=42)
-balanced_df = pd.concat([majority, minority_upsampled])
+# Example usage
+team1_name = "NYI"  # Replace with the desired team name
+team2_name = "WSH"  # Replace with the desired team name
 
-# Step 5: Prepare Features and Labels
-scaler = RobustScaler()
-X = pd.DataFrame(scaler.fit_transform(balanced_df.drop(['team_a', 'team_b', 'label'], axis=1)), columns=balanced_df.drop(['team_a', 'team_b', 'label'], axis=1).columns)
-y = balanced_df['label']
-
-# Step 6: Train-Test Split (Using larger test set)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-
-# Step 7: Train a Simpler Logistic Regression Model
-log_reg = LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42)
-log_reg.fit(X_train, y_train)
-
-# Step 8: Predict Betting Odds for a Specific Match with Temperature Scaling
-def predict_match(team_a, team_b, data, model, temperature=5.0):
-    match_features = create_match_features(team_a, team_b, data)
-    match_features_df = pd.DataFrame([match_features]).drop(['team_a', 'team_b'], axis=1)
-    probabilities = model.predict_proba(match_features_df)[0]
-    
-    # Print predicted probabilities for analysis
-    print(f'Predicted Probabilities: {probabilities}')
-    
-    # Apply temperature scaling to soften the probabilities
-    probabilities = np.power(probabilities, 1 / temperature)
-    probabilities = np.clip(probabilities, 0.1, 0.9)  # Add minimum value to avoid extreme odds
-    probabilities /= probabilities.sum()  # Normalize probabilities to sum to 1
-    
-    odds = {
-        '1 (Team A Win)': round(1 / probabilities[1], 2),
-        '2 (Team B Win)': round(1 / probabilities[0], 2)
-    }
-    return odds
-
-# Example Prediction
-team_a = 'Washington Capitals'
-team_b = 'Philadelphia Flyers'
-odds = predict_match(team_a, team_b, data, log_reg)
-print(f'Predicted Odds for {team_a} vs {team_b}: {odds}')
+print("\nPrediction for matchup:")
+print(predict_matchup_fixed(team1_name, team2_name, data, model_balanced))
